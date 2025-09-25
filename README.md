@@ -67,32 +67,32 @@ To install the necessary components for MeshMap, please follow the steps below:
 
 ## Inputs
 1. `Global Mesh Files`
-   > *mesh_node_coords.txt:* List of node coordinates (x, y, z) for all mesh nodes.
-   > *mesh_tetra_indices.txt:* Tetrahedral connectivity: which 4 node indices form each tetrahedron.
-   > *mesh_tetra_neighbours.txt:* Neighbour tetrahedra for each element (used for interpolation).
+   > *mesh_node_coords.txt:* List of node coordinates (x, y, z) for all mesh nodes.<br>
+   > *mesh_tetra_indices.txt:* Tetrahedral connectivity: which 4 node indices form each tetrahedron.<br>
+   > *mesh_tetra_neighbours.txt:* Neighbour tetrahedra for each element (used for interpolation).<br>
 
 2. `Region Mesh Files`
-   > *{region}_L_node_coords.txt:* Node coordinates belonging to left-side ROI mesh.
-   > *{region}_L_tetra_indices.txt:* Connectivity (tetra indices) for the left ROI.
-   > *{region}_R_node_coords.txt:* Node coordinates belonging to right-side ROI mesh.
-   > *{region}_R_tetra_indices.txt:* Connectivity (tetra indices) for the right ROI.
+   > *{region}_L_node_coords.txt:* Node coordinates belonging to left-side ROI mesh.<br>
+   > *{region}_L_tetra_indices.txt:* Connectivity (tetra indices) for the left ROI.<br>
+   > *{region}_R_node_coords.txt:* Node coordinates belonging to right-side ROI mesh.<br>
+   > *{region}_R_tetra_indices.txt:* Connectivity (tetra indices) for the right ROI.<br>
 
 3. `Surface Files` (optional)
-   > *outer_surface_node_coords.txt:* Node coordinates of the outer brain surface.
-   > *outer_surface_face_indices.txt:* Surface triangle connectivity for outer surface.
-   > *inner_surface_node_coords.txt:* Node coordinates of the inner ventricular surface.
-   > *inner_surface_face_indices.txt:* Surface triangle connectivity for inner surface.
+   > *outer_surface_node_coords.txt:* Node coordinates of the outer brain surface.<br>
+   > *outer_surface_face_indices.txt:* Surface triangle connectivity for outer surface.<br>
+   > *inner_surface_node_coords.txt:* Node coordinates of the inner ventricular surface.<br>
+   > *inner_surface_face_indices.txt:* Surface triangle connectivity for inner surface.<br>
 
 4. `Diffusion Weighted Imaging (DWI) Files` (optional)
-   > *dwi_tensor.nii.gz:* Diffusion tensor volume.
-   > *dwi_L1.nii.gz:* Principal eigenvalue.
-   > *dwi_L2.nii.gz:* Second eigenvalue.
-   > *dwi_L3.nii.gz:* Third eigenvalue.
-   > *dwi_FA.nii.gz:* Fractional anisotropy.
-   > *dwi_MD.nii.gz:* Mean diffusivity.
+   > *dwi_tensor.nii.gz:* Diffusion tensor volume.<br>
+   > *dwi_L1.nii.gz:* Principal eigenvalue.<br>
+   > *dwi_L2.nii.gz:* Second eigenvalue.<br>
+   > *dwi_L3.nii.gz:* Third eigenvalue.<br>
+   > *dwi_FA.nii.gz:* Fractional anisotropy.<br>
+   > *dwi_MD.nii.gz:* Mean diffusivity.<br>
 
 5. `Cerebral Blood Flow (CBF) Files` (optional)
-   > *cbf_map.nii.gz:* CBF (cerebral blood flow) scalar field.
+   > *cbf_map.nii.gz:* CBF (cerebral blood flow) scalar field.<br>
 
 
 ## Pipeline Steps
@@ -108,9 +108,9 @@ After running these commands, the MeshMap pipeline will be run according to the 
 7. `FA Mapping`: If flag *--generate_fa_map* True, a scalar FA map is produced.
 
 ## Other Parameters
-   > *zero_index_inputs:* If True, input files are expected to be zero-index
-   > *zero_index_outputs:* If True, output files are saved as zero-index
-   > *incl_idx_col:* If True, output files are saved containing an index column
+   > *zero_index_inputs:* If True, input files are expected to be zero-index<br>
+   > *zero_index_outputs:* If True, output files are saved as zero-index<br>
+   > *incl_idx_col:* If True, output files are saved containing an index column<br>
 
 ## Data Preparation
 
