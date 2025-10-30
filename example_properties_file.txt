@@ -1,5 +1,4 @@
-{"write_mesh_info":true,
-"adjust_labels_dwi":true,
+{"adjust_labels_dwi":true,
 "adjust_outer_labels":true,
 "generate_cbf_map":true,
 "generate_fa_map":true,

@@ -5,8 +5,10 @@ import shutil
 import glob
 import nibabel as nib
 import numpy as np
+import meshio
 from scipy.spatial import KDTree
 from scipy.sparse import coo_matrix
+from collections import defaultdict
 
 class Core(object):
     """
@@ -14,18 +16,17 @@ class Core(object):
     """
     def __init__(self, plugin_obj):
         # Check all expected attributed are present
-        to_inherit = ["config", "utils", "helpers", "path", "parameters",
-                      "base_dir", "input_dir", "interim_dir", "output_dir",
-                      "global_mesh_node_coords", "global_mesh_tetra_indices", 
-                      "global_mesh_tetra_neighbours", "regional_mesh_dir", 
-                      "surface_dir", "dwi_dir", "cbf_dir", "log_dir", "plugin_env"]
+        to_inherit = ["config", "utils", "helpers", "path", 
+                      "parameters", "base_dir", "input_dir", 
+                      "interim_dir", "output_dir",
+                      "log_dir", "plugin_env"]
         for attr in to_inherit:
             try:
                 setattr(self, attr, getattr(plugin_obj, attr))
             except AttributeError as e:
                 print(f"Attribute Error - {e}")
                 sys.exit(1)
-                
+        
     def read_txt(self, path, dtype=float, index_file=False, remove_idx_col=True):
         """
         Read txt file and optionally convert to zero-index and remove index column.
@@ -100,50 +101,217 @@ class Core(object):
 
         return
 
-    def tetrahedron_circumscribed_sphere(self, T):
+    def extract_mesh_info(self, mesh_path, output_dir, region, cell_type="tetra"):
         """
-        Calculate circumscribed sphere of a tetrahedron using least squares.
-        
+        Extract information from mesh files to txt files for mesh mapping.
+    
         Parameters:
         ---
-        T (np.array): Coordinates of tetrahedron nodes (shape: 4x3)
-        
-        Returns:
-        ---
-        C (np.array): Circumsphere centre (3D coordinates)
-        r (float): Circumsphere radius
+        mesh_path (str) : Path to directory containing .vtk mesh file
+        output_dir (str) : Path to directory to save output .txt files to
+        region (str) : Region that mesh belongs to, required for filename saving
+        cell_type (str): Define whether input is mesh (tetra) or surface (triangles)
         """
-        A = 2 * (T[:, 1:] - T[:, [0]])
-        b = np.sum(T[:, 1:] ** 2 - T[:, [0]] ** 2, axis=0)
-        C = np.linalg.lstsq(A.T, b, rcond=None)[0]
-        return C, np.linalg.norm(C - T[:, 0])
+        # Replace any 'unsigned_char' dtypes with 'int'
+        if cell_type == "tetra":
+            # Load file
+            with open(mesh_path, "r") as f: 
+                content = f.read()
+    
+            # Fix dtypes
+            content = content.replace("unsigned_char", "int")
+    
+            # Save as txt
+            base, _ = os.path.splitext(mesh_path)
+            info_path = base + "_clean.vtk"
+            with open(info_path, "w") as f: 
+                f.write(content)
 
-    def compute_tetra_centres(self, nodes, cell_labels):
-        """
-        Compute circumsphere centres and radii for a set of tetrahedra.
+            mesh_path = info_path
         
+        # Load mesh
+        mesh = meshio.read(mesh_path)
+        
+        # Create output directory
+        if region not in ["global", "outer_surface", "inner_surface"]:
+            output_dir = os.path.join(output_dir, region)
+        os.makedirs(output_dir, exist_ok=True)
+    
+        # Node coordinates and connectivity
+        node_coords = mesh.points
+        tetra = None
+        element_type = ["tetra", "tetra10"] if cell_type == "tetra" else ["triangle", "tri"]
+        for cellblock in mesh.cells:
+            if cellblock.type in element_type:
+                tetra = cellblock.data
+                break
+
+        unique_points, inverse = np.unique(tetra.flatten(), return_inverse=True)
+        tetra = inverse.reshape(tetra.shape)
+        node_coords = node_coords[unique_points]
+
+        # Node coordinates file
+        np.savetxt(os.path.join(output_dir, f"{region}_node_coords.txt"), node_coords, fmt="%.6f")
+
+        # Node indices file
+        if cell_type == "tetra":
+            np.savetxt(os.path.join(output_dir, f"{region}_tetra_indices.txt"), tetra, fmt="%d")
+        else:
+            np.savetxt(os.path.join(output_dir, f"{region}_face_indices.txt"), tetra, fmt="%d")
+    
+        # Node neighbours file
+        if region == "global":
+            # Compute tetrahedron faces
+            faces = np.vstack([
+                np.sort(tetra[:, [0, 1, 2]], axis=1),
+                np.sort(tetra[:, [0, 1, 3]], axis=1),
+                np.sort(tetra[:, [0, 2, 3]], axis=1),
+                np.sort(tetra[:, [1, 2, 3]], axis=1),
+            ])
+            # Tetrahedron IDs for each face
+            tetra_ids = np.repeat(np.arange(len(tetra)), 4)
+            
+            # Sort vertex indices in each face
+            faces_sorted = np.sort(faces, axis=1)
+            
+            # Build structured array for hashing and sorting
+            dtype = np.dtype([('n0', faces_sorted.dtype),
+                              ('n1', faces_sorted.dtype),
+                              ('n2', faces_sorted.dtype)])
+            faces_view = np.empty(faces_sorted.shape[0], dtype=dtype)
+            faces_view['n0'] = faces_sorted[:, 0]
+            faces_view['n1'] = faces_sorted[:, 1]
+            faces_view['n2'] = faces_sorted[:, 2]
+            
+            # Sort faces to group identical together
+            order = np.argsort(faces_view, order=('n0', 'n1', 'n2'))
+            faces_sorted = faces_sorted[order]
+            tetra_ids_sorted = tetra_ids[order]
+            
+            # Identify shared faces
+            dupe_mask = np.all(faces_sorted[1:] == faces_sorted[:-1], axis=1)
+            shared_face_indices = np.nonzero(dupe_mask)[0]
+            
+            # Build tetrahedron neighbour pairs
+            t1 = tetra_ids_sorted[shared_face_indices]
+            t2 = tetra_ids_sorted[shared_face_indices + 1]
+            
+            # Build symmetric adjacency
+            all_pairs = np.vstack([np.column_stack([t1, t2]),
+                                   np.column_stack([t2, t1])])
+            
+            # Sort and deduplicate
+            all_pairs = np.unique(all_pairs, axis=0)
+            
+            # Construct adjacency list
+            neighbours = defaultdict(list)
+            for a, b in all_pairs:
+                neighbours[a].append(b)
+            
+            # Convert to array form, padding with -1 (for boundary faces)
+            max_neigh = max(len(v) for v in neighbours.values())
+            tetra_neighbours = -np.ones((len(tetra), max_neigh), dtype=int)
+            for k, v in neighbours.items():
+                tetra_neighbours[k, :len(v)] = v
+            
+            # Save tetrahedral neighbours
+            np.savetxt(os.path.join(output_dir, f"{region}_tetra_neighbours.txt"), tetra_neighbours, fmt="%d")
+
+        return
+
+    def load_directories(self):
+        """
+        Load required directories for processing
+        """
+        self.surface_dir = os.path.join(self.input_dir, "surface_files") if self.parameters["surface_dir"] else None
+        self.mesh_dir = os.path.join(self.input_dir, "meshes") if self.parameters["mesh_dir"] else None
+        self.global_info_dir = os.path.join(self.input_dir, "global_mesh_info") if self.parameters["global_info_dir"] else None
+        self.regional_info_dir = os.path.join(self.input_dir, "regional_mesh_info") if self.parameters["regional_info_dir"] else None
+        self.surface_info_dir = os.path.join(self.input_dir, "surface_info") if self.parameters["surface_info_dir"] else None
+        self.dwi_dir = os.path.join(self.input_dir, "dwi_files") if self.parameters["dwi_dir"] else None
+        self.cbf_dir = os.path.join(self.input_dir, "cbf_files") if self.parameters["cbf_dir"] else None
+
+    def generate_mesh(self, region, mesh_coarseness=20):
+        """
+        THIS FUNCTION IS IN DEVELOPMENT
+        DO NOT USE
+        Generate a mesh .vtk from a surface .stl file
+    
         Parameters:
         ---
-        nodes (np.array): Node coordinates
-        cell_labels (np.array): Indices of nodes forming tetrahedra
-        
-        Returns:
-        ---
-        centres (np.array): Array of radii and centres (shape: n_tetra x 4)
+        region (str) : Name of region to create mesh file for
+        mesh_coarseness (int): Coarseness of mesh from -50 (coarse) to +50 (fine)
         """
-        centres = np.zeros((len(cell_labels), 4))
-        for i, n in enumerate(cell_labels):
-            C, r = self.tetrahedron_circumscribed_sphere(nodes[n, :].T)
-            centres[i] = [r, *C]
-        return centres
+        # Set up references
+        # doc = sw.App.GetDocument()
+        # model = doc.GetActiveModel()
+        
+        # # Import STL file
+        # doc.ImportSurfaceFromStlFile(os.path.join(self.surface_files, f"{region}.stl", False, 1.0, False)
+    
+        # # Fix surface
+        # doc.GetActiveSurface().Fix(SurfaceFixingControlParameters(9.9999999999999995e-07, 1.0000000000000001e-09))
+    
+        # # FE model creation
+        # doc.CreateFeModel(f"{region} Model")
+        
+        # # Add surface to model
+        # doc.EnableObjectsMode()
+        # doc.GetModelByName(f"{region} Model").AddSurface(doc.GetSurfaceByName(region))
+    
+        # # Set model parameters
+        # doc.EnableModelsMode()
+        # model.SetExportType(Model.VtkVolume) # Set as VTK export
+        # model.SetCompoundCoarsenessOnPart(model.GetPartByName(region), mesh_coarseness)
+    
+        # # Mesh generation
+        # doc.GenerateMesh()
+    
+        # # Export mesh
+        # doc.ExportVtkVolume(os.path.join(self.mesh_dir, f"{region}.vtk"), False)
+    
+        # # Disable region surface file
+        # doc.GetSurfaceByName(region).SetVisible(False)
+        # doc.EnableObjectsMode()
 
+    def prepare_mesh_info_inputs(self):
+        """
+        Prepares input files by processing either surface files, mesh files or txt files
+        """
+        # Extract global mesh information
+        global_mesh = glob.glob(os.path.join(self.mesh_dir, "global", "*global*.vtk"))[0]
+        global_dst = os.path.join(self.input_dir, "global_mesh_info")
+        self.extract_mesh_info(global_mesh, global_dst, "global")
+        self.global_info_dir = os.path.join(self.input_dir, "global_mesh_info")
+
+        # Extract regional mesh information
+        regions = ["cerebrum_L", "cerebrum_R", "cerebrumWM_L", "cerebrumWM_R",
+                   "cerebellum_L", "cerebellum_R", "cerebellumWM_L", "cerebellumWM_R",
+                   "brainstem_L", "brainstem_R"]
+        for region in regions:
+            region_mesh = glob.glob(os.path.join(self.mesh_dir, region, f"*{region}*.vtk"))[0]
+            regional_dst = os.path.join(self.input_dir, "regional_mesh_info")
+            self.extract_mesh_info(region_mesh, regional_dst, region)
+        self.regional_info_dir = os.path.join(self.input_dir, "regional_mesh_info")
+
+        # Extract surface stl information
+        if self.parameters["surface_dir"] and not self.parameters["surface_info_dir"]:
+            surface_dst = os.path.join(self.input_dir, "surface_info")
+            outer_surface = glob.glob(os.path.join(self.surface_dir, "*wholebrain*.stl"))[0]
+            inner_surface = glob.glob(os.path.join(self.surface_dir, "*ventricles*.stl"))[0]
+            self.extract_mesh_info(outer_surface, surface_dst, "outer_surface", cell_type="triangle")
+            self.extract_mesh_info(inner_surface, surface_dst, "inner_surface", cell_type="triangle")
+            self.surface_info_dir = os.path.join(self.input_dir, "surface_info")
+
+        return
+        
     def load_global_files(self):
         """
         Load global mesh coordinate, tetrahedra index and neighbour files.
         """   
-        self.global_mesh_node_coords = self.read_txt(self.global_mesh_node_coords, dtype=float) # Node coords
-        self.global_mesh_tetra_indices = self.read_txt(self.global_mesh_tetra_indices, dtype=int, index_file=True) # Tetrahedra node indices
-        self.global_mesh_tetra_neighbours = self.read_txt(self.global_mesh_tetra_neighbours, dtype=int, index_file=True) # Shared tetrahedra faces
+        self.global_mesh_node_coords = self.read_txt(os.path.join(self.global_info_dir, "global_node_coords.txt"), dtype=float) # Node coords
+        self.global_mesh_tetra_indices = self.read_txt(os.path.join(self.global_info_dir, "global_tetra_indices.txt"), dtype=int, index_file=True) # Tetrahedra node indices
+        self.global_mesh_tetra_neighbours = self.read_txt(os.path.join(self.global_info_dir, "global_tetra_neighbours.txt"), dtype=int, index_file=True) # Shared tetrahedra faces
 
         return
 
@@ -152,76 +320,28 @@ class Core(object):
         Map inner and outer surface face nodes to global mesh node indices.
         """
         # Load surface files
-        self.out_surface_nodes = self.read_txt(os.path.join(self.surface_dir, "outer_surface_node_coords.txt"), dtype=float)
-        self.out_surface_faces = self.read_txt(os.path.join(self.surface_dir, "outer_surface_face_indices.txt"), dtype=int, index_file=True)
-        self.in_surface_nodes = self.read_txt(os.path.join(self.surface_dir, "inner_surface_node_coords.txt"), dtype=float)
-        self.in_surface_faces = self.read_txt(os.path.join(self.surface_dir, "inner_surface_face_indices.txt"), dtype=int, index_file=True)
+        self.out_surface_nodes = self.read_txt(os.path.join(self.surface_info_dir, "outer_surface_node_coords.txt"), dtype=float)
+        self.out_surface_faces = self.read_txt(os.path.join(self.surface_info_dir, "outer_surface_face_indices.txt"), dtype=int, index_file=True)
         
-        inputs = {
-            "outer" : [self.out_surface_nodes, self.out_surface_faces],
-            "inner" : [self.in_surface_nodes, self.in_surface_faces]
-        }
-        
-        for face in inputs:
-            # Build KDTree for nearest neighbour matching
-            tree = KDTree(self.global_mesh_node_coords)
-            dists, matched = tree.query(inputs[face][0])
+        # Build KDTree for nearest neighbour matching
+        tree = KDTree(self.global_mesh_node_coords)
+        dists, matched = tree.query(self.out_surface_nodes)
 
-            # Check node matching against tolerances
-            max_tol = 1e-3
-            if np.any(dists > max_tol):
-                self.helpers.plugin_log(f"WARNING: Some {face} surface nodes mapped > {max_tol}. Max dist = {dists.max():.4e}")
+        # Check node matching against tolerances
+        max_tol = 1e-3
+        if np.any(dists > max_tol):
+            self.helpers.plugin_log(f"WARNING: Some outer surface nodes mapped > {max_tol}. Max dist = {dists.max():.4e}")
 
-            # Remap face indices to global indices
-            remapped = matched[inputs[face][1]]
-    
-            # Save output file
-            output_file = os.path.join(self.interim_dir, f"{face}_surface_face_indices_mapped.txt")
-            self.save_txt(output_file, remapped, index_file=True, add_index_col=False)
-    
-            # Check file produced
-            if not os.path.isfile(output_file):
-                self.helpers.errors(f"Mapping surface face file file not produced - {output_file}")
+        # Remap face indices to global indices
+        remapped = matched[self.out_surface_faces]
 
-        return
-        
-    def write_mesh_info(self):
-        """
-        Write a txt file containing all mesh information.
-        """
-        # Determine indexing system
-        self.idx_offset = 0 if self.parameters["zero_index_outputs"] else 1
-        
-        # Load files
-        self.outer_faces = self.read_txt(os.path.join(self.interim_dir, f"outer_surface_face_indices_mapped.txt"), dtype=int, index_file=True)
-        self.inner_faces = self.read_txt(os.path.join(self.interim_dir, f"inner_surface_face_indices_mapped.txt"), dtype=int, index_file=True)
-        
-        # Writing function
-        def write_block(f, header, elems, prefix):
-            f.write(f"{header}\n{len(elems)}\n")
-            for e in elems:
-                f.write(prefix.format(*e))
-
-        # Write mesh file
-        output_file = os.path.join(self.output_dir, "mesh_info.txt")
-        with open(output_file, 'w') as f:
-            f.write('$Node\n')
-            f.write(f'{len(self.global_mesh_node_coords)}\n')
-            nodes = np.column_stack([
-                np.arange(self.idx_offset, len(self.global_mesh_node_coords) + self.idx_offset),
-                self.global_mesh_node_coords
-            ])
-            for row in nodes:
-                f.write(f"{int(row[0])} {row[1]:.6f} {row[2]:.6f} {row[3]:.6f}\n")
-
-            # Save info to file   
-            write_block(f, "$OuterFaceCell", self.outer_faces + self.idx_offset, "3 o {0} {1} {2}\n")
-            write_block(f, "$InnerFaceCell", self.inner_faces + self.idx_offset, "3 i {0} {1} {2}\n")
-            write_block(f, "$TetraCell", self.global_mesh_tetra_indices + self.idx_offset, "4 {0} {1} {2} {3}\n")
+        # Save output file
+        output_file = os.path.join(self.interim_dir, f"outer_surface_face_indices_mapped.txt")
+        self.save_txt(output_file, remapped, index_file=True, add_index_col=False)
 
         # Check file produced
         if not os.path.isfile(output_file):
-            self.helpers.errors(f"Mesh information file not produced - {output_file}")
+            self.helpers.errors(f"Mapping surface face file not produced - {output_file}")
 
         return
 
@@ -230,77 +350,102 @@ class Core(object):
         Classify which region each tetrahedral element belongs
         to based on circumsphere and centres
         """
+        label_arrays = []
+        region_files = []
+    
         # Define regions
         regions = {
             "cerebrum": [1, 2],
-            "WM": [3, 4],
+            "cerebrumWM": [3, 4],
             "brainstem": [5, 6],
             "cerebellum": [7, 8],
             "cerebellumWM": [9, 10],
         }
-    
-        # Copmute centroids of global tetras
-        tetra_centre = np.column_stack([
-            self.global_mesh_node_coords[self.global_mesh_tetra_indices, :].mean(axis=1)
-        ])
+
+        # Load node tree
+        tree_global = KDTree(self.global_mesh_node_coords)
 
         # Loop over each region
         for region in regions:
             # Load region-specific coords and indices
-            lh_node_coords   = self.read_txt(os.path.join(self.regional_mesh_dir, region, f"{region}_L_node_coords.txt"), dtype=float)
-            lh_tetra_indices = self.read_txt(os.path.join(self.regional_mesh_dir, region, f"{region}_L_tetra_indices.txt"), dtype=int, index_file=True)
-            rh_node_coords   = self.read_txt(os.path.join(self.regional_mesh_dir, region, f"{region}_R_node_coords.txt"), dtype=float)
-            rh_tetra_indices = self.read_txt(os.path.join(self.regional_mesh_dir, region, f"{region}_R_tetra_indices.txt"), dtype=int, index_file=True)
-    
-            # Compute circumspheres (radius and centre)
-            centres_lh = self.compute_tetra_centres(lh_node_coords, lh_tetra_indices)
-            centres_rh = self.compute_tetra_centres(rh_node_coords, rh_tetra_indices)
+            lh_node_coords   = self.read_txt(os.path.join(self.regional_info_dir, f"{region}_L", f"{region}_L_node_coords.txt"), dtype=float)
+            lh_tetra_indices = self.read_txt(os.path.join(self.regional_info_dir, f"{region}_L", f"{region}_L_tetra_indices.txt"), dtype=int, index_file=True)
+            rh_node_coords   = self.read_txt(os.path.join(self.regional_info_dir, f"{region}_R", f"{region}_R_node_coords.txt"), dtype=float)
+            rh_tetra_indices = self.read_txt(os.path.join(self.regional_info_dir, f"{region}_R", f"{region}_R_tetra_indices.txt"), dtype=int, index_file=True)
 
-            # Build KDTrees for nearest-neighbour search of centres
-            tree_lh, tree_rh = KDTree(centres_lh[:, 1:]), KDTree(centres_rh[:, 1:])
-            # Store maximum radius per hemisphere
-            max_r_lh, max_r_rh = centres_lh[:, 0].max(), centres_rh[:, 0].max()
-    
-            # Initialise region labels
-            labels = np.zeros((len(tetra_centre), 1), dtype=int)
+            l_dists, _ = tree_global.query(lh_node_coords, k=1)
+            r_dists, _ = tree_global.query(rh_node_coords, k=1)
+            tol_L, tol_R = float(np.percentile(l_dists, 99)), float(np.percentile(r_dists, 99))
 
-            # Loop global tetrahedron centroids
-            for i, pt in enumerate(tetra_centre):
-                # Check left and right regional meshes
-                for centres, tree, r_max, label in [
-                    (centres_lh, tree_lh, max_r_lh, regions[region][0]),
-                    (centres_rh, tree_rh, max_r_rh, regions[region][1]),
-                ]:
-                    # Skip if already labelled
-                    if labels[i, 0]:
-                        continue
+            # Build KD-trees
+            tree_L = KDTree(lh_node_coords)
+            tree_R = KDTree(rh_node_coords)
 
-                    # Find local cetnres within max radius of current point
-                    idxs = tree.query_ball_point(pt, r=r_max)
+            labels = np.zeros(len(self.global_mesh_node_coords), dtype=np.int8)
 
-                    # Check if point lies in any circumsphere
-                    if idxs and np.any(np.sum((centres[idxs, 1:] - pt) ** 2, 1) < centres[idxs, 0] ** 2):
-                        labels[i, 0] = label
+            # Process in chunks to manage memory
+            chunk_size = 500_000
+            for start in range(0, len(self.global_mesh_node_coords), chunk_size):
+                end = min(start + chunk_size, len(self.global_mesh_node_coords))
+                chunk = self.global_mesh_node_coords[start:end]
+        
+                # Query distances
+                dist_L, _ = tree_L.query(chunk, k=1)
+                dist_R, _ = tree_R.query(chunk, k=1)
+        
+                # Assign labels
+                labels_chunk = np.zeros(len(chunk), dtype=np.int8)
+                labels_chunk[dist_L < tol_L] = regions[region][0]
+                labels_chunk[dist_R < tol_R] = regions[region][1]
+        
+                labels[start:end] = labels_chunk
+        
+            # Save output
+            output_file = os.path.join(self.interim_dir, f"{region}_labels.txt")
+            self.save_txt(output_file, labels, add_index_col=False)
+
+            label_arrays.append(labels)
+            region_files.append(output_file)
+
+        # Combine by taking the maximum label at each node
+        n_nodes = len(label_arrays[0])
+        combined_labels = np.zeros(n_nodes, dtype=int)
+        
+        for region, labels in zip(regions.keys(), label_arrays):
+            mask = labels != 0
+            combined_labels[mask] = labels[mask]
+
+        # Identify labeled and unlabeled nodes
+        unlabeled_idx = np.where(combined_labels == 0)[0]
+        labeled_idx = np.where(combined_labels != 0)[0]
     
-            # Save labels (index + label)
-            outpath = os.path.join(self.interim_dir, f"{region}_labels.txt")
-            self.save_txt(outpath, labels)
+        # Build KD-tree on labeled nodes
+        tree = KDTree(self.global_mesh_node_coords[labeled_idx])
     
-        # Combine all regions, starting from cerebrum
-        combined = self.read_txt(os.path.join(self.interim_dir, "cerebrum_labels.txt"), dtype=int, remove_idx_col=False)
-        for region in regions:
-            if region != "cerebrum":
-                # Load new region label
-                new = self.read_txt(os.path.join(self.interim_dir, f"{region}_labels.txt"), dtype=int)
-                vals = new[:, 0].astype(int) # Pull vals from file
-                idx = np.arange(len(vals)) # Create indices
-                mask = (vals != 0) | (combined[idx, 1] == 0) # Update if new label is non-zero or existing is zero
-                combined[idx[mask], 1] = vals[mask] # Apply new labels
+        # Find nearest labeled node for each unlabeled one
+        _, nearest = tree.query(self.global_mesh_node_coords[unlabeled_idx], k=1)
     
+        # Assign the same label
+        combined_labels[unlabeled_idx] = combined_labels[labeled_idx[nearest]]
+
         # Save combined labels
         output_file = os.path.join(self.interim_dir, "regional_labels.txt")
-        self.save_txt(output_file, combined, add_index_col=False)
+        self.save_txt(output_file, combined_labels, add_index_col=False)
         self.labels_file = output_file
+
+        log_file = os.path.join(self.log_dir, "labelled_node_counts.txt")
+        all_labels = np.unique(combined_labels)
+        unlabelled = np.sum(combined_labels == 0)
+        with open(log_file, 'w') as f:
+            f.write(f"Total global nodes: {n_nodes:,}\n")
+            f.write(f"Unlabelled nodes:   {unlabelled:,} ({unlabelled / n_nodes:.2%})\n")
+    
+        for region, (left_idx, right_idx) in regions.items():
+            n_left = np.sum(combined_labels == left_idx)
+            n_right = np.sum(combined_labels == right_idx)
+            total = n_left + n_right
+            with open(log_file, 'a') as f:
+                f.write(f"{region:20s} L={n_left:,}  R={n_right:,}  Total={total:,}\n")
 
         # Check output file produced
         if not os.path.isfile(output_file):
@@ -314,12 +459,12 @@ class Core(object):
         """
         # Load DWI images (tensor components, eigenvalues, FA, MD)
         nii_files = {
-            "tensor": os.path.join(self.dwi_dir, "dwi_tensor.nii"),
-            "L1": os.path.join(self.dwi_dir, "dwi_L1.nii"),
-            "L2": os.path.join(self.dwi_dir, "dwi_L2.nii"),
-            "L3": os.path.join(self.dwi_dir, "dwi_L3.nii"),
-            "FA": os.path.join(self.dwi_dir, "dwi_FA.nii"),
-            "MD": os.path.join(self.dwi_dir, "dwi_MD.nii"),
+            "tensor": os.path.join(self.dwi_dir, "dwi_tensor.nii.gz"),
+            "L1": os.path.join(self.dwi_dir, "dwi_L1.nii.gz"),
+            "L2": os.path.join(self.dwi_dir, "dwi_L2.nii.gz"),
+            "L3": os.path.join(self.dwi_dir, "dwi_L3.nii.gz"),
+            "FA": os.path.join(self.dwi_dir, "dwi_FA.nii.gz"),
+            "MD": os.path.join(self.dwi_dir, "dwi_MD.nii.gz"),
         }
         imgs = {k: nib.load(v).get_fdata().astype(np.float32) for k, v in nii_files.items()}
     
@@ -554,17 +699,22 @@ class Core(object):
         """
         self.helpers.plugin_log(f"Starting core processing at {self.helpers.now_time()}")
 
+        # Load directories and attributes
+        self.helpers.plugin_log(f"Loading directories")
+        self.load_directories()
+
+        regions = ["global", "ventricles", "brainstem_L", "brainstem_R",
+                   "cerebrum_L", "cerebrum_R", "cerebrumWM_L", "cerebrumWM_R", 
+                   "cerebellum_L", "cerebellum_R", "cerebellumWM_L", "cerebellumWM_R"]
+        
+        # If mesh info files not provided - generate
+        if not self.parameters["global_info_dir"] and not self.parameters["regional_info_dir"]:
+            self.helpers.plugin_log(f"Preparing mesh information inputs")
+            self.prepare_mesh_info_inputs()
+
         # Read global mesh files
+        self.helpers.plugin_log(f"Load global files")
         self.load_global_files()
-
-        # Mapping inner and outer surface nodes and faces to global indices
-        self.helpers.plugin_log(f"Mapping inner and outer nodes and faces to global indices")
-        self.match_faces()
-
-        # Write mesh information file
-        if self.parameters["write_mesh_info"]:
-            self.helpers.plugin_log(f"Writing mesh information file")
-            self.write_mesh_info()
 
         # Classify tetrahedra into regions
         self.helpers.plugin_log(f"Classifying tetrahedra into regions")
@@ -597,6 +747,6 @@ class Core(object):
         shutil.copy(self.labels_file, os.path.join(self.output_dir, "labels.txt"))
 
         # Log completion
-        self.helpers.plugin_log(f"Core analysis completed at {self.helpers.now_time()}...")
+        self.helpers.plugin_log(f"Core analysis completed at {self.helpers.now_time()}")
 
         return

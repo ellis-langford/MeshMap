@@ -63,27 +63,30 @@ To install the necessary components for MeshMap, please follow the steps below:
 - Run the pipeline:
   
   ```bash
-  python3.10 /app/core/mesh_map.py --global_mesh_dir /path/to/input/dir --regional_mesh_dir /path/to/input/dir --props_fpath /path/to/properties/file
+  python3.10 /app/core/mesh_map.py --mesh_dir /path/to/mesh/dir --props_fpath /path/to/properties/file
 
 ## Inputs
-1. `Global Mesh Files`
-   > *mesh_node_coords.txt:* List of node coordinates (x, y, z) for all mesh nodes.<br>
-   > *mesh_tetra_indices.txt:* Tetrahedral connectivity: which 4 node indices form each tetrahedron.<br>
-   > *mesh_tetra_neighbours.txt:* Neighbour tetrahedra for each element (used for interpolation).<br>
+1. `Global Mesh Files` & `Region Mesh Files`
+   > A directory containing both global and regional mesh files can be supplied using *--mesh_dir*<br>
 
-2. `Region Mesh Files`
+2. `Global Mesh Information Files` & `Region Mesh Information Files`
+   > Can be used in place of a mesh directory - specified with *--global_info_dir* and *--regional_info_dir*<br>
+   > *global_node_coords.txt:* List of node coordinates (x, y, z) for all mesh nodes.<br>
+   > *global_tetra_indices.txt:* Tetrahedral connectivity: which 4 node indices form each tetrahedron.<br>
+   > *global_tetra_neighbours.txt:* Neighbour tetrahedra for each element (used for interpolation).<br>
    > *{region}_L_node_coords.txt:* Node coordinates belonging to left-side ROI mesh.<br>
    > *{region}_L_tetra_indices.txt:* Connectivity (tetra indices) for the left ROI.<br>
    > *{region}_R_node_coords.txt:* Node coordinates belonging to right-side ROI mesh.<br>
    > *{region}_R_tetra_indices.txt:* Connectivity (tetra indices) for the right ROI.<br>
 
 3. `Surface Files` (optional)
+   > A directory surface .stl files or information files can be supplied using *--surface_dir* or *--surface_info_dir*<br>
+   > *{region}.stl:* Surface .stl files for each region.<br>
    > *outer_surface_node_coords.txt:* Node coordinates of the outer brain surface.<br>
    > *outer_surface_face_indices.txt:* Surface triangle connectivity for outer surface.<br>
-   > *inner_surface_node_coords.txt:* Node coordinates of the inner ventricular surface.<br>
-   > *inner_surface_face_indices.txt:* Surface triangle connectivity for inner surface.<br>
 
 4. `Diffusion Weighted Imaging (DWI) Files` (optional)
+   > A directory containing diffusion weighted imaging files can be supplied using *--dwi_dir*<br>
    > *dwi_tensor.nii.gz:* Diffusion tensor volume.<br>
    > *dwi_L1.nii.gz:* Principal eigenvalue.<br>
    > *dwi_L2.nii.gz:* Second eigenvalue.<br>
@@ -92,20 +95,19 @@ To install the necessary components for MeshMap, please follow the steps below:
    > *dwi_MD.nii.gz:* Mean diffusivity.<br>
 
 5. `Cerebral Blood Flow (CBF) Files` (optional)
+   > A directory containing cerebral blood flow files can be supplied using *--cbf_dir*<br>
    > *cbf_map.nii.gz:* CBF (cerebral blood flow) scalar field.<br>
-
 
 ## Pipeline Steps
 
 After running these commands, the MeshMap pipeline will be run according to the options in the properties file. The pipeline steps available include:
 
-1. `Match Faces`: Map inner and outer surface nodes and faces to global indices.
-2. `Write Mesh Info File`: If flag *--write_mesh_info* True, a txt file containing mesh information is produced.
-3. `Classify Tetrahedra`: Tetrahedral elements are assigned a regional label.
-4. `Revise Labels by DWI`: If flag *--adjust_labels_dwi* True, the labels will be updated according to DTI FA values.
-5. `Revise Outer Tetra Labels`: If flag *--adjust_outer_labels* True, labels for tetrahedra on the outer surface are fixed.
-6. `CBF Mapping`: If flag *--generate_cbf_map* True, a scalar CBF map is produced.
-7. `FA Mapping`: If flag *--generate_fa_map* True, a scalar FA map is produced.
+1. `Match Faces`: Map outer surface nodes and faces to global indices.
+2. `Classify Tetrahedra`: Tetrahedral elements are assigned a regional label.
+3. `Revise Labels by DWI`: If flag *--adjust_labels_dwi* True, the labels will be updated according to DTI FA values.
+4. `Revise Outer Tetra Labels`: If flag *--adjust_outer_labels* True, labels for tetrahedra on the outer surface are fixed.
+5. `CBF Mapping`: If flag *--generate_cbf_map* True, a scalar CBF map is produced.
+6. `FA Mapping`: If flag *--generate_fa_map* True, a scalar FA map is produced.
 
 ## Other Parameters
    > *zero_index_inputs:* If True, input files are expected to be zero-index<br>
@@ -130,7 +132,6 @@ Output directory
 │   ├── dwi_files
 │   └── cbf_files
 ├── interim_outputs
-│   ├── inner_surface_face_indices_mapped.txt
 │   ├── outer_surface_face_indices_mapped.txt
 │   ├── {region}_labels.txt
 │   ├── regional_labels.txt
@@ -138,7 +139,6 @@ Output directory
 │   └── labels_outer_revised.txt
 ├── logs
 ├── outputs
-│   ├── mesh_info.txt
 │   ├── labels.txt
 │   ├── dwi_tensor.txt
 │   ├── dwi_FA.txt
